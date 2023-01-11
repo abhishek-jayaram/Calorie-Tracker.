@@ -1,0 +1,8 @@
+import cv2
+from pyzbar.pyzbar import decode
+def BAR(location):
+    myData=False
+    img = cv2.imread(location)
+    for barcode in decode(img):
+        myData = barcode.data.decode('utf-8')
+    return myData
