@@ -1,0 +1,198 @@
+import copy
+#from google.colab import drive
+import itertools
+import pandas as pd
+import os
+import re
+import shutil
+from sklearn.model_selection import train_test_split
+#Nutrition value not going to be taken in classes csv because some nutrition values entered wrong. 
+#Fix such issues where synonym and class don't have same nutritional value
+#Fix spelling else it will be treated as another class. 
+#Synonyms MUST be in different columns not same column. 
+#If they are separated by a special character, we have built logic around that which is harder than this method.
+def text_clean(class_list):
+  """
+  Fit text preprocessing steps here. Observe Excel sheet to find out what all steps are required.
+  """
+  class_list=[x.replace("(Mentioned at 413 once)","") for x in class_list]
+  class_list=[x.replace("\n","") for x in class_list]
+  class_list=[x.replace(" in ml","") for x in class_list]
+  class_list=[x.replace("Name Of Classes","") for x in class_list]
+  class_list=[(re.sub(r"[^a-zA-Z]+", ' ',x)).title().strip() for x in class_list]
+  class_list=[x.strip() for x in class_list]
+  class_list=sorted(list(set(class_list)))
+  return class_list
+def class_in_list(s,string):
+  """
+  Checks if string is present in s. This function is used to apply across the dataframe
+  """
+  return string in s
+def generate_classes_list(base_path,xls_file):
+  """
+  Gets the classes in the excel sheet where we add nutritional content. 
+  It assumes synonyms are in different rows and have the same nutritional content. This has to be followed else it would be treated as different classes by the model.
+  """
+
+  #Getting working directory from xls_file. We will store classes_list.csv in the same directory. 
+  #DIR="/".join(xls_file.split("/")[:-1])+'/'
+
+  #Opening the two sheets in excel file as df1 and df2
+  xls = pd.ExcelFile(base_path+xls_file)
+  df1 = pd.read_excel(xls, 0)
+  df2 = pd.read_excel(xls, 1)
+
+  #Removing null values
+  df1.drop(df1[pd.isnull(df1["Name of classes"])].index,inplace=True)
+  #Taking column as a list
+  current_classes=list(df1['Name of classes'])
+  #Applying above preprocessing function
+  current_classes=text_clean(current_classes)
+
+  #Taking relevant columns
+  df2=df2.iloc[:,1:7]
+  df2.drop(df2[pd.isnull(df2["Name of classes"])].index,inplace=True)
+  current_classes_2=list(df2['Name of classes'])
+  current_classes_2=text_clean(current_classes_2)
+
+  L=list()
+  class_df = pd.DataFrame(columns=['Class Name','Synonym'])
+  for index,row in df2.iterrows():
+    Calories=row['Calories per 100g (in Kcal)']
+    Protein=row['Protein ']
+    Fibers=row['Fibers ']	
+    carbs=row['carbs']
+    Fat=row['Fat'] 
+    #Getting class names having same nutritional values
+    same_nutrional_content=list(df2[(df2['Calories per 100g (in Kcal)']==Calories) & (df2['Protein ']==Protein) & (df2['Fibers ']==Fibers) & (df2['carbs']==carbs) & (df2['Fat'] ==Fat)]['Name of classes'])
+    #Adding a list to a list i.e. L will be a list of lists.
+    L.append(same_nutrional_content)
+
+  #Text preprocessing
+  for i in range(len(L)):
+    L[i]=text_clean(L[i])
+
+  #Removing duplicates from a list of lists
+  k=copy.deepcopy(L)
+  k.sort()
+  D=list(k for k,_ in itertools.groupby(k))
+
+  #Adding to csv file
+  for i in D:
+    try:
+      class_df.loc[len(class_df.index)]=[i[0],i[1:]]
+    except IndexError:
+      continue
+
+  for class_name_in_bndbox in current_classes:
+    if(class_name_in_bndbox not in list(class_df['Class Name'])):
+      print(class_name_in_bndbox," Not in class name")
+      if(class_df['Synonym'].apply(class_in_list,args=([class_name_in_bndbox])).any()):
+        i=class_df[class_df['Synonym'].apply(class_in_list,args=([class_name_in_bndbox]))].index
+        c_name=class_df.iloc[i]['Class Name']
+        print("Synonym found at ",i," where class name = ")#,c_name)
+        class_df.iloc[i]['Class Name']=class_name_in_bndbox
+        print("New class name : ",class_name_in_bndbox)
+        class_df.iloc[i]['Synonym'].append(c_name)
+      else:
+        print("No synonym found")
+        class_df.loc[len(class_df.index)]=[class_name_in_bndbox,[]]
+  class_df=class_df.groupby('Class Name').agg({'Synonym': 'sum'})
+  class_df=class_df.rename_axis('Class Name').reset_index()
+  print(class_df)
+  print(os.getcwd())
+  class_df.to_csv(base_path+"Classes_List.csv")
+"""
+generate_classes_list("/content/Franchise Food Items..xlsx")
+"""
+#This is supposed to be in one row but soya nugget curry nutritional value different from soya curry
+#In addition, two rows of soya chunks curry exist with different nutritional values.
+"""
+class_df.loc[2331:2332,:]
+"""
+#Function to return regex getting string value until number which is image id in our case.
+def classname_from_imagename(test_str):
+  """
+  Gets string values until a number. As per our naming conventions, image id will be the only number in an image name. String until that number would be the class name or classes in that image.
+  """
+  return re.findall('([a-zA-Z _]*)\d*.*', test_str)[0][:-1]
+#image id should be ordered from 0 to n(images)
+#filename	width	height	class	xmin	ymin	xmax	ymax	image_id
+def generate_train_test_csv(base_path,Image_Metadata_csv):
+  """
+  Splits images having batch == None into train/test as per the ratio specified in train_test_split in this function. 
+  Batch == None would mean it has not been trained. 
+  """
+  metadata_df=pd.read_csv(base_path+Image_Metadata_csv)
+  #Extracting images where batch is none which means they haven't been trained.
+  bndbox_df=metadata_df[metadata_df["Batch"].isnull()]
+
+  #Dictionary where class name -> key, images of that class -> value
+  classes_dict=dict()
+  classes_list=list(set(bndbox_df['Image Name'].apply(classname_from_imagename)))
+  for i in classes_list:
+    classes_dict[i]=list(set(bndbox_df.loc[bndbox_df['Image Name'].apply(classname_from_imagename)==i]['Image Name']))
+    #print(classes_dict[i])
+
+  TRAIN=list()
+  TEST=list()
+  Less_Images_List=list()
+  for i in classes_dict.keys():
+    try:
+      train, test = train_test_split(classes_dict[i], test_size=0.2)
+      TRAIN.extend(train)
+      TEST.extend(test)
+    #Value error if only one image is there. We can't split one image into two lists. We add those files into train. 
+    except ValueError:
+      Less_Images_List.extend(classes_dict[i])
+
+  #Round up images of classes without enough images. Add those images to a list. Split them again. If again, value error, we add it to train. 
+  try:
+    train, test = train_test_split(Less_Images_List, test_size=0.2)
+    TRAIN.extend(train)
+    TEST.extend(test)
+  except ValueError:
+    TRAIN.extend(Less_Images_List)
+  print("Train dataset : ",TRAIN)
+  print("Test dataset : ",TEST)
+
+  image_id=0
+  train_df = pd.DataFrame(columns=['filename','width','height','class','xmin','ymin','xmax','ymax','image_id'])
+  for i in TRAIN:
+    index=bndbox_df[bndbox_df['Image Name']==i].index
+    for j in index:
+      filename=bndbox_df.loc[j,'Image Name']
+      width=bndbox_df.loc[j,'Width']
+      height=bndbox_df.loc[j,'Height']
+      class_name=bndbox_df.loc[j,'Class']
+      xmin=bndbox_df.loc[j,'xmin']
+      ymin=bndbox_df.loc[j,'ymin']
+      xmax=bndbox_df.loc[j,'xmax']
+      ymax=bndbox_df.loc[j,'ymax']
+      print("Added to train : ",[filename,width,height,class_name,xmin,ymin,xmax,ymax,image_id])
+      train_df.loc[len(train_df)]=[filename,width,height,class_name,xmin,ymin,xmax,ymax,image_id]
+    image_id+=1
+  train_df.to_csv(base_path+"train_labels.csv",index=False)
+
+  image_id=0
+  test_df = pd.DataFrame(columns=['filename','width','height','class','xmin','ymin','xmax','ymax','image_id'])
+  for i in TEST:
+    index=bndbox_df[bndbox_df['Image Name']==i].index
+    for j in index:
+      filename=bndbox_df.loc[j,'Image Name']
+      width=bndbox_df.loc[j,'Width']
+      height=bndbox_df.loc[j,'Height']
+      class_name=bndbox_df.loc[j,'Class']
+      xmin=bndbox_df.loc[j,'xmin']
+      ymin=bndbox_df.loc[j,'ymin']
+      xmax=bndbox_df.loc[j,'xmax']
+      ymax=bndbox_df.loc[j,'ymax']
+      print("Added to test : ",[filename,width,height,class_name,xmin,ymin,xmax,ymax,image_id])
+      test_df.loc[len(test_df)]=[filename,width,height,class_name,xmin,ymin,xmax,ymax,image_id]
+    image_id+=1
+  test_df.to_csv(base_path+"test_labels.csv",index=False)
+"""
+drive.mount('/content/drive', force_remount=True)
+Image_Metadata_csv='/content/drive/MyDrive/Experiment/Image Metadata.csv'
+generate_train_test_csv(Image_Metadata_csv)
+"""
